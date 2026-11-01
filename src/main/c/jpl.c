@@ -1452,30 +1452,51 @@ jni_hr_add_unlocked(JNIEnv * env, jobject  lref, pointer *iref)
    now that entry is gone, its space is recovered, counts are adjusted
    etc. called only from jni_free_iref() iref: a possibly spurious
    canonical global iref
+
+   The entry of a valid iref is in the slot of the identityHashCode() of
+   its object.  An iref of a <jref> blob is valid as the entry lives as
+   long as the blob.  If we cannot compute the hash we search the table.
 */
 
 static bool
+jni_hr_unlink(JNIEnv *env, HrEntry **epp, pointer iref)
+{ HrEntry *ep;
+
+  for (ep = *epp; ep != NULL; epp = &(ep->next), ep = *epp)
+  { if ((pointer)(ep->obj) == iref) /* found the sought entry? */
+    { (*env)->DeleteGlobalRef(env,
+			      ep->obj); /* free the global object reference */
+      *epp = ep->next;                  /* bypass the entry */
+      free(ep);                         /* free the now-redundant space */
+      hr_table->count--;                /* adjust table's entry count */
+      DEBUG(1,
+	    Sdprintf(
+		"[found & removed hashtable entry for object reference %" PRIuPTR "]\n",
+		iref));
+      return TRUE; /* entry found and removed */
+    }
+  }
+
+  return FALSE;
+}
+
+static bool
 jni_hr_del_unlocked(JNIEnv *env, pointer iref)
-{ int       index; /* index to a HashedRef table slot */
-  HrEntry * ep;    /* pointer to a HashedRef table entry */
-  HrEntry **epp;   /* pointer to ep's handle, in case it needs updating */
+{ int index; /* index to a HashedRef table slot */
+  int hash;  /* System.identityHashCode of the object */
 
   DEBUG(1, Sdprintf("[removing possible object reference %" PRIuPTR "]\n", iref));
-  for (index = 0; index < hr_table->length; index++) /* for each slot */
-  { for (epp = &(hr_table->slots[index]), ep = *epp; ep != NULL;
-	 epp = &(ep->next), ep = *epp)
-    { if ((pointer)(ep->obj) == iref) /* found the sought entry? */
-      { (*env)->DeleteGlobalRef(env,
-				ep->obj); /* free the global object reference */
-	*epp = ep->next;                  /* bypass the entry */
-	free(ep);                         /* free the now-redundant space */
-	hr_table->count--;                /* adjust table's entry count */
-	DEBUG(1,
-	      Sdprintf(
-		  "[found & removed hashtable entry for object reference %" PRIuPTR "]\n",
-		  iref));
-	return TRUE; /* entry found and removed */
-      }
+  if (hr_table == NULL || iref == 0)
+    return FALSE;
+
+  if (jni_hr_hash(env, (jobject)iref, &hash))
+  { if (jni_hr_unlink(env, &hr_table->slots[HASH_INDEX(hr_table, hash)], iref))
+      return TRUE;
+  } else
+  { (*env)->ExceptionClear(env);
+    for (index = 0; index < hr_table->length; index++) /* for each slot */
+    { if (jni_hr_unlink(env, &hr_table->slots[index], iref))
+	return TRUE;
     }
   }
   DEBUG(1, Sdprintf("[JPL: failed to find hashtable entry for (presumably "
