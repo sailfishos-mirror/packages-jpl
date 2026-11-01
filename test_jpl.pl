@@ -72,6 +72,7 @@ test_jpl :-
      ,jpl_type_to_classname
      ,jpl_classname_to_type
      ,safe_type_to_classname
+     ,jpl_local
     ]).
 
 
@@ -1508,6 +1509,84 @@ maplist_java_id_part_char_but_not_start_char(ListIn,ListOut) :-
           (\+ jpl:jpl_java_id_start_char(C))),T),
       ListIn,ListOut).
 
+
+%  Called from Java by jpl_local:put_atom_chars
+
+jpl_local_check(X) :-
+    '$local_atom'(X).
+
+:- begin_tests(jpl_local, [condition(local_atoms)]).
+
+% Object references and Strings returned by Java are thread-local atoms
+% if the system supports them: the thread reclaims them in its own
+% sweep.  A reference that reaches another thread is promoted and stays
+% the same atom.
+
+local_atoms :-
+    current_predicate(system:'$local_atom'/1),
+    current_prolog_flag(threads, true).
+
+test(local_jref, Local == true) :-
+    jpl_new('java.lang.Object', [], R),
+    truth('$local_atom'(R), Local).
+test(local_string, [Local-N == true-X]) :-
+    X is random(1<<60),                % text of a new atom
+    jpl_call('java.lang.Long', toString, [X], S),
+    atom_number(S, N),
+    truth('$local_atom'(S), Local).
+test(put_atom_chars, Local == @(true)) :-  % Java Atom -> Prolog atom
+    X is random(1<<60),
+    jpl_call('org.jpl7.Test', atomOfLong, [X], A),
+    jpl_new('org.jpl7.Query', ['test_jpl:jpl_local_check(?)', A], Q),
+    jpl_call(Q, hasSolution, [], Local).
+test(local_sweep_releases, true(Released >= 4000)) :-
+    thread_create(release_churn(5000, Released), Id),
+    thread_join(Id, Status),
+    Status = exited(Released).
+% A Java thread takes an engine from the pool for its query.  The
+% engine sweeps when it returns to the pool: it does not run again until
+% another query takes it.
+
+test(pool_release, [Ok == @(true), true(Released >= 900)]) :-
+    jpl:jni_hr_info(_, _, _, D0),
+    jpl_call('org.jpl7.Test', queryInThread,
+             ['forall(between(1,1000,_), jpl_new(\'java.lang.Object\',[],_))'],
+             Ok),
+    jpl:jni_hr_info(_, _, _, D1),
+    Released is D1-D0.
+test(other_thread_same_ref,
+     [ true(Before == true), true(Same == true), true(After == false) ]) :-
+    jpl_new('java.lang.Object', [], O),
+    jpl_new('java.util.ArrayList', [], L),
+    jpl_call(L, add, [O], _),
+    truth('$local_atom'(O), Before),
+    thread_create(first_element(L), Id),
+    thread_join(Id, exited(O2)),
+    truth(O2 == O, Same),
+    truth('$local_atom'(O), After).
+
+%  Create N objects in a new thread and tell how many references the
+%  local sweep released before the thread ends.  We do not call
+%  garbage_collect_atoms/0.
+
+release_churn(N, Released) :-
+    jpl:jni_hr_info(_, _, _, D0),
+    forall(between(1, N, _), jpl_new('java.lang.Object', [], _)),
+    jpl:jni_hr_info(_, _, _, D1),
+    Released is D1-D0,
+    thread_exit(Released).
+
+first_element(L) :-
+    jpl_call(L, get, [0], O),
+    thread_exit(O).
+
+truth(Goal, Bool) :-
+    (   call(Goal)
+    ->  Bool = true
+    ;   Bool = false
+    ).
+
+:- end_tests(jpl_local).
 
 :- begin_tests(identifier_chars).
 

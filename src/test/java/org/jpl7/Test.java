@@ -1,5 +1,6 @@
 package org.jpl7;
 
+import org.jpl7.Atom;
 import org.jpl7.Compound;
 import org.jpl7.Query;
 import org.jpl7.Term;
@@ -330,5 +331,25 @@ public class Test {
 
 	public static Term wrapTerm(Term in) { // for dmiles 11/Jul/2008
 		return new Compound("javaWrap", new Term[] { in });
+	}
+
+	// An Atom whose text Prolog has not seen, as String results of
+	// Java methods become atoms
+	public static Term atomOfLong(long n) {
+		return new Atom(Long.toString(n));
+	}
+
+	// Solve goal in a new Java thread, which takes an engine from the pool
+	public static boolean queryInThread(final String goal)
+			throws InterruptedException {
+		final boolean[] result = new boolean[1];
+		Thread t = new Thread(new Runnable() {
+			public void run() {
+				result[0] = new Query(goal).hasSolution();
+			}
+		});
+		t.start();
+		t.join();
+		return result[0];
 	}
 }

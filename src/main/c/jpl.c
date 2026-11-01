@@ -462,6 +462,7 @@ static int  jni_hr_del(JNIEnv *, pointer);
 static bool jni_free_iref(JNIEnv *env, pointer iref);
 static bool jni_object_to_iref(JNIEnv *env, jobject obj, pointer *iref);
 static bool jni_String_to_atom(JNIEnv *env, jobject s, atom_t *a);
+static bool jni_unify_String(JNIEnv *env, jobject s, term_t t);
 static bool jni_atom_to_String(JNIEnv *env, atom_t a, jobject *s);
 
 
@@ -520,9 +521,19 @@ load_jref(IOSTREAM *fd)
   return PL_new_atom("<saved-jref-handle>");
 }
 
+/* References are thread-local blobs if supported: the thread that creates
+ * them reclaims them in its own sweep, which also runs the release hook
+ * in a thread that is attached to the JVM.  Another thread that refers
+ * to the same Java object finds the blob and promotes it.
+ */
+
+#ifndef PL_BLOB_LOCAL
+#define PL_BLOB_LOCAL 0
+#endif
+
 static PL_blob_t jref_blob =
 { PL_BLOB_MAGIC,
-  PL_BLOB_UNIQUE,
+  PL_BLOB_UNIQUE|PL_BLOB_LOCAL,
   "jref",
   release_jref_handle,
   NULL,
@@ -979,15 +990,7 @@ jni_jobject_to_term(jobject j, term_t t, JNIEnv *env)
 			 JNI_atom_null);
 
   if ((*env)->IsInstanceOf(env, j, str_class))
-  { atom_t a;
-
-    if (jni_String_to_atom(env, j, &a))
-    { int rc = PL_unify_atom(t, a);
-      PL_unregister_atom(a);
-      return rc;
-    }
-    return FALSE;
-  }
+    return jni_unify_String(env, j, t);
 
   if (jni_object_to_iref(env, j, &i))
     return jni_unify_iref(t, i);
@@ -1047,23 +1050,29 @@ jni_free_iref(JNIEnv *env, pointer iref)
   }
 }
 
-/* called from jni_jobject_to_term() and org.jpl7.fli.Prolog#new_atom()
- * NB this delivers an atom_t, not a term_t
- * returns FALSE if the String arg is NULL
+/* jni_String_to_text() converts the String `s` to an atom.  If `a` is
+ * not NULL, it creates the atom and returns it in `a`.  Otherwise it
+ * unifies `t` with the atom, which makes a new atom thread-local.
+ * Returns false if `s` is NULL.
  */
 
 #define FASTJCHAR 512
 
 static bool
-jni_String_to_atom(JNIEnv *env, jobject s, atom_t *a)
-{ if ( s == NULL )
+jni_String_to_text(JNIEnv *env, jobject s, atom_t *a, term_t t)
+{ bool rc;
+
+  if ( s == NULL )
     return false;
 
   jsize        len = (*env)->GetStringLength(env, s);
   const jchar *jcp = (*env)->GetStringChars(env, s, NULL);
 
 #if SIZEOF_WCHAR_T == 2
-  { *a = PL_new_atom_wchars(len, jcp); /* easy, huh? (thanks, Jan) */
+  { if ( a )				/* easy, huh? (thanks, Jan) */
+      rc = (*a = PL_new_atom_wchars(len, jcp)) != 0;
+    else
+      rc = PL_unify_wchars(t, PL_ATOM, len, jcp);
   }
 #else
   { pl_wchar_t tmp[FASTJCHAR];
@@ -1085,14 +1094,33 @@ jni_String_to_atom(JNIEnv *env, jobject s, atom_t *a)
       }
     }
 
-    *a = PL_new_atom_wchars(wpi-wp, wp);
+    if ( a )
+      rc = (*a = PL_new_atom_wchars(wpi-wp, wp)) != 0;
+    else
+      rc = PL_unify_wchars(t, PL_ATOM, wpi-wp, wp);
     if ( wp != tmp )
       free(wp);
   }
 #endif
 
   (*env)->ReleaseStringChars(env, s, jcp);
-  return *a != 0;
+  return rc;
+}
+
+/* called from org.jpl7.fli.Prolog#new_atom() and others that need the
+ * atom_t.  The caller must unregister the atom.
+ */
+
+static bool
+jni_String_to_atom(JNIEnv *env, jobject s, atom_t *a)
+{ return jni_String_to_text(env, s, a, 0);
+}
+
+/* called from jni_jobject_to_term() */
+
+static bool
+jni_unify_String(JNIEnv *env, jobject s, term_t t)
+{ return jni_String_to_text(env, s, NULL, t);
 }
 
 /* Branching on len to silence GCC-11 */
@@ -4449,13 +4477,11 @@ Java_org_jpl7_fli_Prolog_put_1atom_1chars(
     JNIEnv *env,
     jclass jProlog, jobject jterm, jstring chars)
 { term_t term;
-  atom_t a;
 
   return ( jpl_ensure_pvm_init(env) &&
 	   getTermValue(env, jterm, &term) &&
-	   jni_String_to_atom(env, chars, &a) &&
-	   PL_put_atom(term, a) &&
-	   (PL_unregister_atom(a),TRUE) );
+	   PL_put_variable(term) &&
+	   jni_unify_String(env, chars, term) );
 }
 
 
